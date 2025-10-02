@@ -2,11 +2,11 @@
 from dataclasses import dataclass
 from typing import Tuple, Dict, List, Optional
 import math
-import numpy as np 
+import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import patches
 
-Action = str  # "N","S","E","W","Stay"
+Action = str  # "Up","Down","Left","Right","Stay"
 
 ACTIONS: List[Action] = ["Up", "Down", "Left", "Right", "Stay"]
 DELTA: Dict[Action, Tuple[int, int]] = {
@@ -29,15 +29,6 @@ class GridSpec:
     seed: Optional[int] = 0
 
 class IceCreamGridworld:
-    """
-    Canonical gridworld with:
-      - actions: Up, Down, Left, Right, Stay
-      - transition noise: with prob (1 - p_error) the chosen action succeeds,
-        with prob p_error one of the 4 alternate outcomes is chosen uniformly.
-      - invalid destinations (off grid or obstacle) cause the agent to stay.
-      - observation o is a noisy integer based on the harmonic mean h of the
-        Euclidean distances to RD and RS, with probabilistic rounding.
-    """
     def __init__(self, spec: GridSpec):
         self.spec = spec
         self.rng = np.random.default_rng(spec.seed)
@@ -54,7 +45,6 @@ class IceCreamGridworld:
         return cand if self._valid(cand) else s
 
     def transition_probs(self, s: Tuple[int, int], a: Action) -> Dict[Tuple[int, int], float]:
-        """Return P(s'|s,a) as a dict over successor states."""
         chosen_next = self._apply_delta(s, DELTA[a])
         alts = [x for x in ACTIONS if x != a]
         alt_nexts = [self._apply_delta(s, DELTA[aa]) for aa in alts]
@@ -62,16 +52,11 @@ class IceCreamGridworld:
         probs: Dict[Tuple[int, int], float] = {}
         p_succ = 1.0 - self.spec.p_error
         p_err_each = self.spec.p_error / 4.0
-
         for nxt, p in [(chosen_next, p_succ)] + list(zip(alt_nexts, [p_err_each] * 4)):
             probs[nxt] = probs.get(nxt, 0.0) + p
         return probs
 
     def step(self, a: Action):
-        """
-        Sample next state using the model and return:
-          next_state, observation_o, probs_dict
-        """
         s = self.state
         probs = self.transition_probs(s, a)
         next_states = list(probs.keys())
@@ -84,10 +69,6 @@ class IceCreamGridworld:
         return s_next, o, probs
 
     def observe(self, s: Tuple[int, int]) -> int:
-        """
-        h = 2 / (1/d_D + 1/d_S) with h=0 if either distance is 0.
-        Observation o is floor/ceil(h) with probabilistic rounding.
-        """
         dD = self._euclid(s, self.spec.RD)
         dS = self._euclid(s, self.spec.RS)
         if dD == 0 or dS == 0:
@@ -112,6 +93,7 @@ class IceCreamGridworld:
             close_ax = True
 
         w, h = self.spec.width, self.spec.height
+        ax.clear()
         ax.set_xlim(0, w)
         ax.set_ylim(0, h)
         ax.set_aspect("equal")
@@ -136,21 +118,58 @@ class IceCreamGridworld:
         if close_ax:
             plt.show()
 
-def run_demo(env: IceCreamGridworld, actions: List[Action]):
-    env.state = env.spec.start
-    for t, a in enumerate(actions):
-        s_prev = env.state
-        s_next, o, probs = env.step(a)
-        print(f"Step {t}: s={s_prev}, a={a}")
-        for k, v in probs.items():
-            print(f"  -> {k}: {v:.3f}")
-        print(f"  Sampled s'={s_next}, observation o={o}\n")
-        fig, ax = plt.subplots(figsize=(4, 4))
-        env.render(ax=ax, title=f"t={t}, action={a}, o={o}")
-        plt.show()
-    fig, ax = plt.subplots(figsize=(4, 4))
-    env.render(ax=ax, title=f"Final state: {env.state}")
-    plt.show()
+# ---------- Arrow-key controller ----------
+
+KEY_TO_ACTION: Dict[str, Action] = {
+    "up": "Up",
+    "down": "Down",
+    "left": "Left",
+    "right": "Right",
+    " ": "Stay",     # space bar
+}
+
+class KeyboardController:
+    """
+    Opens a Matplotlib window. Each arrow key press performs one step.
+    'r' resets to the start; 'q' quits.
+    """
+    def __init__(self, env: IceCreamGridworld):
+        self.env = env
+        self.fig, self.ax = plt.subplots(figsize=(5, 5))
+        self.fig.canvas.mpl_connect("key_press_event", self.on_key)
+        self.update(title="Use arrow keys. Space=Stay, r=reset, q=quit")
+        plt.show(block=True)
+
+    def update(self, title=""):
+        self.env.render(ax=self.ax, title=title)
+        self.fig.canvas.draw_idle()
+
+    def on_key(self, event):
+        key = (event.key or "").lower()
+        if key == "q":
+            plt.close(self.fig)
+            return
+        if key == "r":
+            self.env.state = self.env.spec.start
+            print("\n[reset] state ->", self.env.state)
+            self.update(title="Reset")
+            return
+
+        if key in KEY_TO_ACTION:
+            a = KEY_TO_ACTION[key]
+            s_prev = self.env.state
+            s_next, o, probs = self.env.step(a)
+
+            # print transition model & outcome
+            print(f"\nAction={a} from s={s_prev}")
+            for k, v in probs.items():
+                print(f"  P(s'={k}) = {v:.3f}")
+            print(f"Sampled s'={s_next}, observation o={o}")
+
+            self.update(title=f"a={a}, o={o}")
+        else:
+            # ignore other keys but keep focus text
+            self.update(title="Use arrow keys. Space=Stay, r=reset, q=quit")
 
 if __name__ == "__main__":
     # Example map matching the handout figure
@@ -164,7 +183,4 @@ if __name__ == "__main__":
         seed=42,
     )
     env = IceCreamGridworld(spec)
-
-    # Try your own actions here
-    actions = ["Left", "Left", "Down", "Down", "Right", "Right", "Up", "Up", "Stay"]
-    run_demo(env, actions)
+    KeyboardController(env)  # launches interactive window
