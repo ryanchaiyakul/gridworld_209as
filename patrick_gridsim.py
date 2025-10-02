@@ -8,12 +8,12 @@ from matplotlib import patches
 
 Action = str  # "N","S","E","W","Stay"
 
-ACTIONS: List[Action] = ["N", "S", "E", "W", "Stay"]
+ACTIONS: List[Action] = ["Up", "Down", "Left", "Right", "Stay"]
 DELTA: Dict[Action, Tuple[int, int]] = {
-    "N": (0, 1),
-    "S": (0, -1),
-    "E": (1, 0),
-    "W": (-1, 0),
+    "Up": (0, 1),
+    "Down": (0, -1),
+    "Right": (1, 0),
+    "Left": (-1, 0),
     "Stay": (0, 0),
 }
 
@@ -31,7 +31,7 @@ class GridSpec:
 class IceCreamGridworld:
     """
     Canonical gridworld with:
-      - actions: N, S, E, W, Stay
+      - actions: Up, Down, Left, Right, Stay
       - transition noise: with prob (1 - p_error) the chosen action succeeds,
         with prob p_error one of the 4 alternate outcomes is chosen uniformly.
       - invalid destinations (off grid or obstacle) cause the agent to stay.
@@ -166,5 +166,5 @@ if __name__ == "__main__":
     env = IceCreamGridworld(spec)
 
     # Try your own actions here
-    actions = ["W", "W", "S", "S", "E", "E", "N", "N", "Stay"]
+    actions = ["Left", "Left", "Down", "Down", "Right", "Right", "Up", "Up", "Stay"]
     run_demo(env, actions)
