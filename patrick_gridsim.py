@@ -18,6 +18,25 @@ DELTA: Dict[Action, Tuple[int, int]] = {
     "Stay": (0, 0),
 }
 
+# ---- tie-break helpers (fix) ----
+def manhattan(a, b):
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+def nearest_store_distance(env, s):
+    return min(manhattan(s, env.spec.RD), manhattan(s, env.spec.RS))
+
+def tie_break_by_distance(env, s, a, use_expected=True):
+    """
+    Lower is better. If use_expected=True, use expected Manhattan distance
+    after the stochastic step. If False, use only the deterministic outcome.
+    """
+    if use_expected:
+        probs = env.transition_probs(s, a)
+        return sum(p * nearest_store_distance(env, s_next) for s_next, p in probs.items())
+    else:
+        det = env._apply_delta(s, DELTA[a])
+        return nearest_store_distance(env, det)
+
 @dataclass
 class GridSpec:
     width: int
@@ -102,7 +121,7 @@ class IceCreamGridworld:
     def render(self, ax=None, title: str = ""):
         close_ax = False
         if ax is None:
-            fig, ax = plt.subplots(figsize=(4.5, 4.5))
+            fig, ax = plt.subplots(figsize=(4.8, 4.8))
             close_ax = True
 
         w, h = self.spec.width, self.spec.height
@@ -227,12 +246,13 @@ def reward_terminal_once(env, task: TaskSpec, s_next: State) -> Tuple[float, boo
         return task.RS, True
     return task.RW, False
 
-# Value iteration
+# Value iteration with tie-break on action choice
 def value_iteration(env, task: TaskSpec, theta: float = 1e-6, max_iter: int = 10000):
     S = enumerate_states(env)
     idx = {s: i for i, s in enumerate(S)}
     V = np.zeros(len(S), dtype=float)
     terminal = (task.reward_mode == "terminal_once")
+    eps = 1e-12  # for numeric tie detection
 
     for _ in range(max_iter):
         delta = 0.0
@@ -242,7 +262,7 @@ def value_iteration(env, task: TaskSpec, theta: float = 1e-6, max_iter: int = 10
             if terminal and is_store(env, s):
                 V_new[i] = 0.0
                 continue
-            best = -1e18
+            best_q, best_tie = -1e18, +1e18
             for a in ACTIONS:
                 probs = env.transition_probs(s, a)
                 q = 0.0
@@ -256,21 +276,22 @@ def value_iteration(env, task: TaskSpec, theta: float = 1e-6, max_iter: int = 10
                     j = idx[s_next]
                     nxt = 0.0 if (terminal and done) else V[j]
                     q += p * (r + task.gamma * nxt)
-                if q > best:
-                    best = q
-            V_new[i] = best
+                tie = tie_break_by_distance(env, s, a, use_expected=True)
+                if (q > best_q + eps) or (abs(q - best_q) <= eps and tie < best_tie):
+                    best_q, best_tie = q, tie
+            V_new[i] = best_q
             delta = max(delta, abs(V_new[i] - V[i]))
         V = V_new
         if delta < theta:
             break
 
-    # greedy policy
+    # greedy policy with same tie-break
     pi: Dict[State, Action] = {}
     for s in S:
         if terminal and is_store(env, s):
             pi[s] = "Stay"
             continue
-        best_a, best_q = "Stay", -1e18
+        best_a, best_q, best_tie = "Stay", -1e18, +1e18
         for a in ACTIONS:
             probs = env.transition_probs(s, a)
             q = 0.0
@@ -284,18 +305,20 @@ def value_iteration(env, task: TaskSpec, theta: float = 1e-6, max_iter: int = 10
                 j = idx[s_next]
                 nxt = 0.0 if (terminal and done) else V[j]
                 q += p * (r + task.gamma * nxt)
-            if q > best_q:
-                best_q, best_a = q, a
+            tie = tie_break_by_distance(env, s, a, use_expected=True)
+            if (q > best_q + eps) or (abs(q - best_q) <= eps and tie < best_tie):
+                best_q, best_a, best_tie = q, a, tie
         pi[s] = best_a
     return V, pi, S
 
-# Policy iteration (optional but included)
+# Policy iteration with the same tie-break in improvement
 def policy_iteration(env, task: TaskSpec, theta: float = 1e-8, max_eval: int = 10000, max_iter: int = 1000):
     S = enumerate_states(env)
     idx = {s: i for i, s in enumerate(S)}
     pi = {s: "Stay" for s in S}
     V = np.zeros(len(S), dtype=float)
     terminal = (task.reward_mode == "terminal_once")
+    eps = 1e-12
 
     def policy_eval():
         for _ in range(max_eval):
@@ -329,7 +352,7 @@ def policy_iteration(env, task: TaskSpec, theta: float = 1e-8, max_eval: int = 1
         stable = True
         for s in S:
             old = pi[s]
-            best_a, best_q = old, -1e18
+            best_a, best_q, best_tie = old, -1e18, +1e18
             for a in ACTIONS:
                 probs = env.transition_probs(s, a)
                 q = 0.0
@@ -343,8 +366,9 @@ def policy_iteration(env, task: TaskSpec, theta: float = 1e-8, max_eval: int = 1
                     j = idx[s_next]
                     nxt = 0.0 if (terminal and done) else V[j]
                     q += p * (r + task.gamma * nxt)
-                if q > best_q:
-                    best_q, best_a = q, a
+                tie = tie_break_by_distance(env, s, a, use_expected=True)
+                if (q > best_q + eps) or (abs(q - best_q) <= eps and tie < best_tie):
+                    best_q, best_a, best_tie = q, a, tie
             pi[s] = best_a
             if best_a != old:
                 stable = False
@@ -355,9 +379,9 @@ def policy_iteration(env, task: TaskSpec, theta: float = 1e-8, max_eval: int = 1
 # Utilities
 ARROW = {"Up": "↑", "Down": "↓", "Left": "←", "Right": "→", "Stay": "•"}
 
-def plot_policy(env, pi, S):
+def plot_policy(env, pi, S, title="Policy"):
     fig, ax = plt.subplots(figsize=(4.8, 4.8))
-    env.render(ax=ax, title="Policy")
+    env.render(ax=ax, title=title)
     for s, a in pi.items():
         x, y = s
         ax.text(x + 0.5, y + 0.5, ARROW[a], ha="center", va="center", fontsize=16)
@@ -374,46 +398,36 @@ def rollout(env, pi, start: Optional[State] = None, steps: int = 30, seed: Optio
         a = pi[env.state]
         s_next, o, _ = env.step(a)
         traj.append((s_next, a, o))
-        if is_store(env, s_next) and False:
-            break
+        # if you want episodic termination on entering a shop, add a break here
     return traj
 
 # --------------------------- Run as script ---------------------------
-
 if __name__ == "__main__":
+    # <<< Adjust your map here >>>
     spec = GridSpec(
         width=5, height=5,
-        obstacles={(1, 1), (1, 3), (3, 1), (3, 3)},
+        obstacles={(0, 2), (2, 0),(2, 1),(2,2),(1,2)},
         RD=(4, 4),
         RS=(0, 0),
-        start=(1, 2),
+        start=(2, 3),
         p_error=0.2,
         seed=42,
     )
     env = IceCreamGridworld(spec)
 
-    # 1) Interactive driving
-    # KeyboardController(env)  # uncomment to drive with arrow keys
+    # 1) Interactive driving (uncomment to use)
+    # KeyboardController(env)
 
-    # 2) Planning examples
-    # a) Infinite horizon, reward by start state
-    task = TaskSpec(RD=10.0, RS=8.0, RW=-0.1, gamma=0.95, reward_mode="start_state")
+    # 2) Planning with start-state rewards (default Week 2 task)
+    task = TaskSpec(RD=10.0, RS=10.0, RW=-0.1, gamma=0.95, reward_mode="start_state")
     V, pi, S = value_iteration(env, task)
-    print("Value iteration done. Example values:")
-    for s in [(2,4), (2,3), (2,2), (1,0)]:
-        print(s, "->", V[S.index(s)])
-    plot_policy(env, pi, S)
+    plot_policy(env, pi, S, title="Optimal policy (start-state reward)")
 
-    # sample rollout under the stochastic dynamics
-    tr = rollout(env, pi, steps=20, seed=7)
-    print("Rollout:", tr)
+    # Try intentional-entry and terminal-once variants if you want:
+    # task2 = TaskSpec(RD=10.0, RS=10.0, RW=-0.1, gamma=0.95, reward_mode="intentional_entry")
+    # V2, pi2, S2 = value_iteration(env, task2)
+    # plot_policy(env, pi2, S2, title="Policy (intentional entry)")
 
-    # b) Intentional entry variant
-    task2 = TaskSpec(RD=10.0, RS=10.0, RW=-0.1, gamma=0.95, reward_mode="intentional_entry")
-    V2, pi2, S2 = value_iteration(env, task2)
-    plot_policy(env, pi2, S2)
-
-    # c) One-time terminal reward episodic variant
-    task3 = TaskSpec(RD=20.0, RS=20.0, RW=-0.1, gamma=0.99, reward_mode="terminal_once")
-    V3, pi3, S3 = value_iteration(env, task3)
-    plot_policy(env, pi3, S3)
+    # task3 = TaskSpec(RD=20.0, RS=20.0, RW=-0.1, gamma=0.99, reward_mode="terminal_once")
+    # V3, pi3, S3 = value_iteration(env, task3)
+    # plot_policy(env, pi3, S3, title="Policy (terminal once)")
